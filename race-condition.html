@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Проблема неблокирующего чтения</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=Unbounded:wght@400;700;900&display=swap');
+
+  :root {
+    --bg: #0a0a0f;
+    --surface: #12121a;
+    --border: #1e1e2e;
+    --alice: #4fc3f7;
+    --alice-dim: rgba(79,195,247,0.15);
+    --bob: #f48fb1;
+    --bob-dim: rgba(244,143,177,0.15);
+    --db: #a5d6a7;
+    --db-dim: rgba(165,214,167,0.12);
+    --danger: #ef5350;
+    --warn: #ffb74d;
+    --ok: #66bb6a;
+    --text: #e0e0e0;
+    --muted: #666;
+    --accent: #7c4dff;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 32px 16px;
+  }
+
+  h1 {
+    font-family: 'Unbounded', sans-serif;
+    font-size: clamp(16px, 3vw, 24px);
+    font-weight: 900;
+    letter-spacing: -0.5px;
+    margin-bottom: 6px;
+    background: linear-gradient(90deg, #ef5350, #ff8a65);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    text-align: center;
+  }
+
+  .subtitle {
+    color: var(--muted);
+    font-size: 12px;
+    margin-bottom: 28px;
+    text-align: center;
+  }
+
+  .scenario-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 24px;
+  }
+
+  .tab {
+    padding: 8px 18px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+
+  .tab.active {
+    border-color: var(--danger);
+    color: var(--danger);
+    background: rgba(239,83,80,0.08);
+  }
+
+  .tab.ok.active {
+    border-color: var(--ok);
+    color: var(--ok);
+    background: rgba(102,187,106,0.08);
+  }
+
+  .stage {
+    width: 100%;
+    max-width: 860px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    overflow: hidden;
+  }
+
+  /* Timeline columns */
+  .timeline {
+    display: grid;
+    grid-template-columns: 1fr 140px 1fr;
+    gap: 0;
+    padding: 20px 16px;
+    position: relative;
+  }
+
+  .col-header {
+    text-align: center;
+    padding: 10px;
+    border-radius: 8px;
+    font-size: 12px;
+    font-family: 'Unbounded', sans-serif;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    margin-bottom: 16px;
+  }
+
+  .col-header.alice { background: var(--alice-dim); color: var(--alice); border: 1px solid rgba(79,195,247,0.3); }
+  .col-header.db    { background: var(--db-dim);    color: var(--db);    border: 1px solid rgba(165,214,167,0.3); }
+  .col-header.bob   { background: var(--bob-dim);   color: var(--bob);   border: 1px solid rgba(244,143,177,0.3); }
+
+  .steps-col {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0;
+  }
+
+  .steps-center {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+  }
+
+  .step {
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.4s, transform 0.4s;
+    min-height: 64px;
+    display: flex;
+    align-items: center;
+    padding: 0 8px;
+  }
+
+  .step.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .step-box {
+    padding: 8px 12px;
+    border-radius: 8px;
+    font-size: 11.5px;
+    line-height: 1.5;
+    width: 100%;
+    position: relative;
+  }
+
+  .step-box.alice-box {
+    background: var(--alice-dim);
+    border: 1px solid rgba(79,195,247,0.25);
+    color: #b3e5fc;
+    text-align: right;
+  }
+
+  .step-box.bob-box {
+    background: var(--bob-dim);
+    border: 1px solid rgba(244,143,177,0.25);
+    color: #fce4ec;
+    text-align: left;
+  }
+
+  .step-box.db-box {
+    background: var(--db-dim);
+    border: 1px solid rgba(165,214,167,0.25);
+    color: #c8e6c9;
+    text-align: center;
+    font-size: 11px;
+  }
+
+  .step-box.danger-box {
+    background: rgba(239,83,80,0.12);
+    border: 1px solid rgba(239,83,80,0.4);
+    color: #ffcdd2;
+  }
+
+  .step-box.ok-box {
+    background: rgba(102,187,106,0.12);
+    border: 1px solid rgba(102,187,106,0.4);
+    color: #c8e6c9;
+  }
+
+  .label {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    opacity: 0.6;
+    display: block;
+    margin-bottom: 2px;
+  }
+
+  /* Center DB arrows */
+  .db-slot {
+    min-height: 64px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 3px;
+    padding: 4px 0;
+  }
+
+  .arrow {
+    font-size: 10px;
+    color: var(--muted);
+    opacity: 0;
+    transition: opacity 0.4s;
+  }
+  .arrow.visible { opacity: 1; }
+
+  .db-value {
+    font-size: 13px;
+    font-weight: 700;
+    padding: 4px 10px;
+    border-radius: 20px;
+    transition: all 0.5s;
+  }
+
+  .db-value.neutral { background: var(--db-dim); color: var(--db); border: 1px solid rgba(165,214,167,0.3); }
+  .db-value.danger  { background: rgba(239,83,80,0.15); color: var(--danger); border: 1px solid rgba(239,83,80,0.4); }
+  .db-value.ok-val  { background: rgba(102,187,106,0.15); color: var(--ok); border: 1px solid rgba(102,187,106,0.4); }
+
+  /* Controls */
+  .controls {
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-top: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    padding: 9px 20px;
+    border-radius: 7px;
+    border: none;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.18s;
+  }
+
+  .btn-next {
+    background: var(--accent);
+    color: white;
+  }
+  .btn-next:hover { background: #9c6fff; }
+  .btn-next:disabled { opacity: 0.3; cursor: default; }
+
+  .btn-reset {
+    background: transparent;
+    color: var(--muted);
+    border: 1px solid var(--border);
+  }
+  .btn-reset:hover { color: var(--text); border-color: #444; }
+
+  .step-counter {
+    color: var(--muted);
+    font-size: 11px;
+    margin-left: auto;
+  }
+
+  /* Explanation panel */
+  .explain {
+    padding: 14px 20px;
+    border-top: 1px solid var(--border);
+    font-size: 12px;
+    line-height: 1.7;
+    color: #aaa;
+    min-height: 60px;
+    transition: all 0.3s;
+  }
+
+  .explain strong { color: var(--text); }
+  .explain .tag {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 700;
+    margin-right: 6px;
+  }
+  .tag-danger { background: rgba(239,83,80,0.2); color: var(--danger); }
+  .tag-ok     { background: rgba(102,187,106,0.2); color: var(--ok); }
+  .tag-info   { background: rgba(124,77,255,0.2); color: #b39ddb; }
+
+  /* Result banner */
+  .result-banner {
+    display: none;
+    margin: 12px 16px;
+    padding: 14px 18px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-family: 'Unbounded', sans-serif;
+    font-weight: 700;
+    text-align: center;
+  }
+
+  .result-banner.danger {
+    display: block;
+    background: rgba(239,83,80,0.1);
+    border: 1px solid rgba(239,83,80,0.5);
+    color: var(--danger);
+  }
+
+  .result-banner.ok {
+    display: block;
+    background: rgba(102,187,106,0.1);
+    border: 1px solid rgba(102,187,106,0.5);
+    color: var(--ok);
+  }
+
+  /* Timeline vertical line */
+  .vline {
+    width: 2px;
+    background: var(--border);
+    border-radius: 2px;
+    flex: 1;
+    min-height: 8px;
+  }
+
+  .time-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--border);
+    flex-shrink: 0;
+    transition: background 0.3s;
+  }
+  .time-dot.active { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+
+  .legend {
+    display: flex;
+    gap: 20px;
+    justify-content: center;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+  }
+
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  .legend-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+  }
+</style>
+</head>
+<body>
+
+<h1>🔓 Проблема гонки транзакций</h1>
+<p class="subtitle">Что происходит, когда два пользователя читают одно и то же без блокировки</p>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#4fc3f7"></div> Алиса (пользователь 1)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#a5d6a7"></div> База данных</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#f48fb1"></div> Боб (пользователь 2)</div>
+</div>
+
+<div class="scenario-tabs">
+  <button class="tab active" onclick="loadScenario('bad')">😱 Без блокировки (баг)</button>
+  <button class="tab ok" onclick="loadScenario('good')">✅ С блокировкой (правильно)</button>
+</div>
+
+<div class="stage">
+  <div class="timeline" id="timeline">
+    <!-- Headers -->
+    <div>
+      <div class="col-header alice">👩 Алиса</div>
+      <div class="steps-col" id="col-alice"></div>
+    </div>
+    <div>
+      <div class="col-header db">🗄️ БД</div>
+      <div class="steps-center" id="col-db"></div>
+    </div>
+    <div>
+      <div class="col-header bob">👨 Боб</div>
+      <div class="steps-col" id="col-bob"></div>
+    </div>
+  </div>
+
+  <div class="result-banner" id="result-banner"></div>
+
+  <div class="explain" id="explain">
+    Нажмите <strong>«Следующий шаг»</strong>, чтобы пройти сценарий пошагово.
+  </div>
+
+  <div class="controls">
+    <button class="btn btn-next" id="btn-next" onclick="nextStep()">▶ Следующий шаг</button>
+    <button class="btn btn-reset" onclick="resetScenario()">↺ Сначала</button>
+    <span class="step-counter" id="step-counter">Шаг 0 / 0</span>
+  </div>
+</div>
+
+<script>
+const scenarios = {
+  bad: {
+    title: 'bad',
+    context: '💰 Ситуация: На счёте 1000₽. Алиса и Боб одновременно снимают по 700₽.',
+    steps: [
+      {
+        alice: { text: 'Запрашиваю баланс\nSELECT balance\nFROM account', class: 'alice-box' },
+        bob:   null,
+        db:    { value: '1000₽', class: 'neutral', arrow_l: '←', arrow_r: '' },
+        explain: '<span class="tag tag-info">ШАГ 1</span> <strong>Алиса читает баланс.</strong> Она видит 1000₽. Пока всё нормально — транзакция ещё не начата, блокировки нет.'
+      },
+      {
+        alice: null,
+        bob:   { text: 'Запрашиваю баланс\nSELECT balance\nFROM account', class: 'bob-box' },
+        db:    { value: '1000₽', class: 'neutral', arrow_l: '', arrow_r: '→' },
+        explain: '<span class="tag tag-info">ШАГ 2</span> <strong>Боб тоже читает баланс — 1000₽.</strong> Поскольку Алиса не поставила блокировку, Боб спокойно читает то же самое значение. Оба уверены, что на счету 1000₽.'
+      },
+      {
+        alice: { text: '1000 ≥ 700, можно снять!\nНачинаю транзакцию…\nBEGIN', class: 'alice-box' },
+        bob:   null,
+        db:    { value: '1000₽', class: 'neutral', arrow_l: '', arrow_r: '' },
+        explain: '<span class="tag tag-info">ШАГ 3</span> <strong>Алиса проверяет: 1000 ≥ 700 — хватает!</strong> Она начинает транзакцию. Но чтение уже прошло до транзакции — это ключевая ошибка.'
+      },
+      {
+        alice: null,
+        bob:   { text: '1000 ≥ 700, можно снять!\nНачинаю транзакцию…\nBEGIN', class: 'bob-box' },
+        db:    { value: '1000₽', class: 'neutral', arrow_l: '', arrow_r: '' },
+        explain: '<span class="tag tag-info">ШАГ 4</span> <strong>Боб тоже проверяет: 1000 ≥ 700 — хватает!</strong> Он тоже начинает транзакцию. Оба считают, что денег достаточно — ведь оба читали 1000₽.'
+      },
+      {
+        alice: { text: 'UPDATE account\nSET balance = 1000−700\nCOMMIT ✓', class: 'alice-box' },
+        bob:   null,
+        db:    { value: '300₽', class: 'neutral', arrow_l: '←', arrow_r: '' },
+        explain: '<span class="tag tag-info">ШАГ 5</span> <strong>Алиса списывает 700₽ и сохраняет.</strong> Баланс стал 300₽. Всё ок со стороны Алисы.'
+      },
+      {
+        alice: null,
+        bob:   { text: 'UPDATE account\nSET balance = 1000−700\nCOMMIT ✓', class: 'danger-box' },
+        db:    { value: '−400₽ 💀', class: 'danger', arrow_l: '', arrow_r: '→' },
+        explain: '<span class="tag tag-danger">КАТАСТРОФА</span> <strong>Боб тоже списывает 700₽ — но из старого значения 1000₽!</strong> Баланс становится -400₽. Банк выдал 1400₽ вместо 1000₽. Деньги потеряны.'
+      }
+    ],
+    finalBanner: { text: '💸 Итог: -400₽ на счёте. Банк потерял деньги.', class: 'danger' }
+  },
+
+  good: {
+    title: 'good',
+    context: '💰 Ситуация: На счёте 1000₽. Алиса и Боб одновременно пытаются снять по 700₽.',
+    steps: [
+      {
+        alice: { text: 'BEGIN\nSELECT balance\nFROM account\nFOR UPDATE 🔒', class: 'alice-box ok-box' },
+        bob:   null,
+        db:    { value: '🔒 1000₽', class: 'ok-val', arrow_l: '←', arrow_r: '' },
+        explain: '<span class="tag tag-ok">ШАГ 1</span> <strong>Алиса начинает транзакцию и сразу ставит блокировку</strong> (FOR UPDATE). Чтение и блокировка — одна атомарная операция внутри транзакции.'
+      },
+      {
+        alice: null,
+        bob:   { text: 'BEGIN\nSELECT balance\nFOR UPDATE\n⏳ Жду блокировку...', class: 'bob-box' },
+        db:    { value: '🔒 1000₽', class: 'ok-val', arrow_l: '', arrow_r: '→' },
+        explain: '<span class="tag tag-ok">ШАГ 2</span> <strong>Боб пытается прочитать — но запись заблокирована Алисой.</strong> База данных ставит Боба в очередь. Он ждёт. Никакой гонки не возникает.'
+      },
+      {
+        alice: { text: '1000 ≥ 700 ✓\nUPDATE account\nSET balance = 300\nCOMMIT\n🔓 Снимаю блокировку', class: 'alice-box ok-box' },
+        bob:   null,
+        db:    { value: '300₽', class: 'ok-val', arrow_l: '←', arrow_r: '' },
+        explain: '<span class="tag tag-ok">ШАГ 3</span> <strong>Алиса проверяет, списывает 700₽ и коммитит.</strong> Баланс = 300₽. Блокировка снята.'
+      },
+      {
+        alice: null,
+        bob:   { text: 'Блокировка снята!\nЧитаю актуальный\nбаланс: 300₽', class: 'bob-box' },
+        db:    { value: '300₽', class: 'ok-val', arrow_l: '', arrow_r: '→' },
+        explain: '<span class="tag tag-ok">ШАГ 4</span> <strong>Боб наконец получает доступ и читает актуальный баланс — 300₽.</strong> Не устаревшие данные, а реальное состояние после Алисы.'
+      },
+      {
+        alice: null,
+        bob:   { text: '300 < 700\nНедостаточно средств\nROLLBACK ✓', class: 'bob-box ok-box' },
+        db:    { value: '300₽', class: 'ok-val', arrow_l: '', arrow_r: '' },
+        explain: '<span class="tag tag-ok">УСПЕХ</span> <strong>Боб видит, что денег не хватает, и отменяет операцию.</strong> Баланс остался 300₽. Никаких потерь, никакого минуса.'
+      }
+    ],
+    finalBanner: { text: '✅ Итог: 300₽ на счёте. Всё корректно.', class: 'ok' }
+  }
+};
+
+let currentScenario = 'bad';
+let currentStep = 0;
+let scenario = null;
+
+function loadScenario(name) {
+  currentScenario = name;
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  event.target.classList.add('active');
+  resetScenario();
+}
+
+function resetScenario() {
+  scenario = scenarios[currentScenario];
+  currentStep = 0;
+
+  const colAlice = document.getElementById('col-alice');
+  const colBob = document.getElementById('col-bob');
+  const colDb = document.getElementById('col-db');
+
+  colAlice.innerHTML = '';
+  colBob.innerHTML = '';
+  colDb.innerHTML = '';
+
+  // Pre-render all step slots as hidden
+  scenario.steps.forEach((s, i) => {
+    // Alice
+    const aDiv = document.createElement('div');
+    aDiv.className = 'step';
+    aDiv.id = `alice-${i}`;
+    if (s.alice) {
+      aDiv.innerHTML = `<div class="step-box ${s.alice.class}"><span class="label">Алиса</span>${escHtml(s.alice.text)}</div>`;
+    } else {
+      aDiv.style.minHeight = '64px';
+    }
+    colAlice.appendChild(aDiv);
+
+    // Bob
+    const bDiv = document.createElement('div');
+    bDiv.className = 'step';
+    bDiv.id = `bob-${i}`;
+    if (s.bob) {
+      bDiv.innerHTML = `<div class="step-box ${s.bob.class}"><span class="label">Боб</span>${escHtml(s.bob.text)}</div>`;
+    } else {
+      bDiv.style.minHeight = '64px';
+    }
+    colBob.appendChild(bDiv);
+
+    // DB center
+    const dDiv = document.createElement('div');
+    dDiv.className = 'db-slot';
+    dDiv.id = `db-${i}`;
+    const arrowL = s.db?.arrow_l || '';
+    const arrowR = s.db?.arrow_r || '';
+    dDiv.innerHTML = `
+      <div class="arrow" id="arr-l-${i}">${arrowL ? '← запрос' : ''}</div>
+      <div class="db-value ${s.db?.class || 'neutral'}" id="dbval-${i}">${s.db?.value || ''}</div>
+      <div class="arrow" id="arr-r-${i}">${arrowR ? 'ответ →' : ''}</div>
+    `;
+    colDb.appendChild(dDiv);
+  });
+
+  document.getElementById('result-banner').style.display = 'none';
+  document.getElementById('result-banner').className = 'result-banner';
+  document.getElementById('explain').innerHTML = `<strong>Сценарий:</strong> ${scenario.context}<br>Нажмите <strong>«Следующий шаг»</strong>, чтобы пройти пошагово.`;
+  document.getElementById('btn-next').disabled = false;
+  updateCounter();
+}
+
+function nextStep() {
+  if (!scenario) return;
+  if (currentStep >= scenario.steps.length) return;
+
+  const i = currentStep;
+  const s = scenario.steps[i];
+
+  // Show alice
+  if (s.alice) document.getElementById(`alice-${i}`)?.classList.add('visible');
+  else { const el = document.getElementById(`alice-${i}`); if(el) el.classList.add('visible'); }
+
+  // Show bob
+  if (s.bob) document.getElementById(`bob-${i}`)?.classList.add('visible');
+  else { const el = document.getElementById(`bob-${i}`); if(el) el.classList.add('visible'); }
+
+  // Show db arrows
+  setTimeout(() => {
+    const arrL = document.getElementById(`arr-l-${i}`);
+    const arrR = document.getElementById(`arr-r-${i}`);
+    const dbVal = document.getElementById(`dbval-${i}`);
+    if(arrL) arrL.classList.add('visible');
+    if(arrR) arrR.classList.add('visible');
+    if(dbVal) dbVal.classList.add('visible');
+  }, 200);
+
+  // Explain
+  document.getElementById('explain').innerHTML = s.explain;
+
+  currentStep++;
+  updateCounter();
+
+  if (currentStep >= scenario.steps.length) {
+    document.getElementById('btn-next').disabled = true;
+    const banner = document.getElementById('result-banner');
+    banner.textContent = scenario.finalBanner.text;
+    banner.className = `result-banner ${scenario.finalBanner.class}`;
+    setTimeout(() => banner.style.display = 'block', 400);
+  }
+}
+
+function updateCounter() {
+  document.getElementById('step-counter').textContent = `Шаг ${currentStep} / ${scenario?.steps.length || 0}`;
+}
+
+function escHtml(str) {
+  return str.replace(/\n/g, '<br>');
+}
+
+// Init
+window.onload = () => {
+  scenario = scenarios[currentScenario];
+  resetScenario();
+};
+</script>
+</body>
+</html>
